@@ -1,4 +1,9 @@
-app.py
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/SEU_USUARIO/bom-sabor-delivery.git
+git push -u origin main,esse é o erroapp.py
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from flask_sqlalchemy import SQLAlchemy
 from functools import wraps
