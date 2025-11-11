@@ -1,6 +1,326 @@
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/SEU_USUARIO/bom-sabor-delivery.git
-git push -u origin main
+app.py
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from functools import wraps
+import urllib.parse
+
+app = Flask(__name__)
+app.secret_key = 'sua_chave_secreta_mude_aqui'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+class Prato(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(100), nullable=False)
+    preco = db.Column(db.Float, nullable=False)
+
+def init_db():
+    with app.app_context():
+        db.drop_all()
+        db.create_all()
+        pratos_iniciais = [
+            ("Munguzá Cremoso", 15.00),
+            ("Arroz de Leite", 12.00),
+            ("Baião Mole", 18.00)
+        ]
+        for nome, preco in pratos_iniciais:
+            if not Prato.query.filter_by(nome=nome).first():
+                db.session.add(Prato(nome=nome, preco=preco))
+        db.session.commit()
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'admin' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/')
+def index():
+    return redirect(url_for('cliente'))
+
+@app.route('/cliente')
+def cliente():
+    pratos = Prato.query.all()
+    return render_template('cliente.html', pratos=pratos)
+
+@app.route('/add/<int:prato_id>')
+def add_carrinho(prato_id):
+    prato = Prato.query.get_or_404(prato_id)
+    carrinho = session.get('carrinho', {})
+    carrinho[str(prato_id)] = carrinho.get(str(prato_id), 0) + 1
+    session['carrinho'] = carrinho
+    flash(f"{prato.nome} adicionado ao carrinho!")
+    return redirect(url_for('cliente'))
+
+@app.route('/finalizar', methods=['GET', 'POST'])
+def finalizar():
+    carrinho = session.get('carrinho', {})
+    if not carrinho:
+        flash("Seu carrinho está vazio!")
+        return redirect(url_for('cliente'))
+
+    itens = []
+    total = 0
+    for prato_id, qtd in carrinho.items():
+        prato = Prato.query.get(int(prato_id))
+        if prato:
+            subtotal = prato.preco * qtd
+            total += subtotal
+            itens.append({'prato': prato, 'qtd': qtd, 'subtotal': subtotal})
+
+    if request.method == 'POST':
+        nome = request.form['nome'].strip()
+        telefone = request.form['telefone'].strip().replace(' ', '').replace('-', '')
+        endereco = request.form['endereco'].strip()
+        troco = request.form.get('troco', '').strip()
+
+        if len(nome) < 2 or len(telefone) < 10 or len(endereco) < 10:
+            flash("Preencha todos os campos corretamente.")
+            return render_template('finalizar.html', itens=itens, total=total)
+
+        itens_txt = "\n".join([f"{item['qtd']}x {item['prato'].nome} - R$ {item['subtotal']:.2f}" for item in itens])
+        troco_txt = f"\nTroco para: R$ {troco}" if troco else "\nSem troco"
+
+        mensagem = f"""*PEDIDO - Bom Sabor*
+
+*Nome:* {nome}
+*Telefone:* {telefone}
+*Endereço:* {endereco}{troco_txt}
+
+*Itens:*
+{itens_txt}
+
+*Total: R$ {total:.2f}*
+
+Obrigado pelo pedido!"""
+
+        msg_encoded = urllib.parse.quote(mensagem)
+        whatsapp_url = f"https://wa.me/5588921494170?text={msg_encoded}"
+
+        session.pop('carrinho', None)
+        return redirect(whatsapp_url)
+
+    return render_template('finalizar.html', itens=itens, total=total)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form['senha'] == 'admin123':
+            session['admin'] = True
+            return redirect(url_for('admin'))
+        flash("Senha incorreta!")
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('admin', None)
+    return redirect(url_for('cliente'))
+
+@app.route('/admin', methods=['GET', 'POST'])
+@login_required
+def admin():
+    if request.method == 'POST':
+        acao = request.form['acao']
+        if acao == 'adicionar':
+            nome = request.form['nome']
+            preco = float(request.form['preco'])
+            novo = Prato(nome=nome, preco=preco)
+            db.session.add(novo)
+            db.session.commit()
+            flash(f"{nome} adicionado!")
+        elif acao == 'editar':
+            id_prato = request.form['id']
+            prato = Prato.query.get(id_prato)
+            prato.nome = request.form['nome']
+            prato.preco = float(request.form['preco'])
+            db.session.commit()
+            flash("Prato atualizado!")
+        elif acao == 'excluir':
+            id_prato = request.form['id']
+            prato = Prato.query.get(id_prato)
+            db.session.delete(prato)
+            db.session.commit()
+            flash(f"{prato.nome} removido!")
+    pratos = Prato.query.all()
+    return render_template('admin.html', pratos=pratos)
+
+if __name__ == '__main__':
+    with app.app_context():
+        init_db()
+    app.run(debug=False)templates/finalizar.html
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Finalizar Pedido - Bom Sabor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Bom Sabor</h1>
+    <a href="{{ url_for('cliente') }}" class="voltar">Voltar</a>
+  </header>
+
+  <div class="container">
+    <h2>Finalizar Pedido</h2>
+
+    <div class="resumo">
+      {% for item in itens %}
+      <div class="item-carrinho">
+        <span><strong>{{ item.qtd }}x {{ item.prato.nome }}</strong></span>
+        <span>R$ {{ "%.2f"|format(item.subtotal) }}</span>
+      </div>
+      {% endfor %}
+      <div class="total">
+        <strong>Total: R$ {{ "%.2f"|format(total) }}</strong>
+      </div>
+    </div>
+
+    <form method="POST" class="form-pedido">
+      <input type="text" name="nome" placeholder="Seu primeiro nome" required />
+      <input type="tel" name="telefone" placeholder="Seu WhatsApp (com DDD)" required />
+      <textarea name="endereco" placeholder="Endereço completo (rua, número, bairro)" required></textarea>
+      <input type="text" name="troco" placeholder="Troco para quanto? (opcional)" />
+
+      <button type="submit" class="btn whatsapp">Enviar Pedido no WhatsApp</button>
+    </form>
+
+    <p class="info">Seu pedido será enviado diretamente para o WhatsApp do Bom Sabor.</p>
+  </div>
+</body>
+</html>templates/admin.html
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Admin - Bom Sabor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Bom Sabor - Admin</h1>
+    <a href="{{ url_for('logout') }}" class="logout">Sair</a>
+  </header>
+
+  <div class="container">
+    <h2>Adicionar Prato</h2>
+    <form method="POST">
+      <input type="hidden" name="acao" value="adicionar" />
+      <input type="text" name="nome" placeholder="Nome do prato" required />
+      <input type="number" step="0.01" name="preco" placeholder="Preço" required />
+      <button type="submit" class="btn">Adicionar</button>
+    </form>
+
+    <h2>Pratos Cadastrados</h2>
+    {% for prato in pratos %}
+    <form method="POST" class="edit-form">
+      <input type="hidden" name="id" value="{{ prato.id }}" />
+      <input type="hidden" name="acao" value="editar" />
+      <input type="text" name="nome" value="{{ prato.nome }}" required />
+      <input type="number" step="0.01" name="preco" value="{{ prato.preco }}" required />
+      <button type="submit" class="btn small">Salvar</button>
+      <button type="submit" formaction="{{ url_for('admin') }}" name="acao" value="excluir" class="btn small delete">Excluir</button>
+    </form>
+    {% endfor %}
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <div class="flash">{{ messages[-1] }}</div>
+    {% endif %}
+  {% endwith %}
+  %}
+</body>
+</html>templates/login.html
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Login Admin - Bom Sabor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-page">
+  <div class="login-box">
+    <h2>Login Admin</h2>
+    <form method="POST">
+      <input type="password" name="senha" placeholder="Senha" required />
+      <button type="submit" class="btn">Entrar</button>
+    </form>
+    <p><a href="{{ url_for('cliente') }}">Voltar ao cardápio</a></p>
+  </div>
+</body>
+</html>static/style.css
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', sans-serif; background: #f8f9fa; color: #333; line-height: 1.6; }
+header { background: #d35400; color: white; padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+header h1 { font-size: 1.5rem; }
+.carrinho-btn, .voltar, .logout { background: #e67e22; color: white; padding: 0.5rem 1rem; border-radius: 8px; text-decoration: none; font-weight: bold; }
+.container { max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
+.menu { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; }
+.card { background: white; padding: 1rem; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center; }
+.preco { font-size: 1.3rem; color: #27ae60; font-weight: bold; margin: 0.5rem 0; }
+.btn { background: #27ae60; color: white; padding: 0.7rem 1rem; border: none; border-radius: 8px; text-decoration: none; display: inline-block; margin-top: 0.5rem; }
+.btn.small { padding: 0.4rem 0.8rem; font-size: 0.9rem; }
+.btn.delete { background: #c0392b; }
+.item-carrinho { display: flex; justify-content: space-between; align-items: center; background: white; padding: 1rem; margin: 0.5rem 0; border-radius: 8px; }
+.total { font-size: 1.4rem; text-align: right; margin: 1rem 0; font-weight: bold; color: #27ae60; }
+.flash { position: fixed; top: 1rem; right: 1rem; background: #27ae60; color: white; padding: 1rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 1000; }
+.contato { text-align: center; margin: 2rem 0; padding: 1rem; background: #fff8e1; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+.telefone { font-size: 1.5rem; font-weight: bold; color: #27ae60; margin: 0.5rem 0; }
+.btn.whatsapp { background: #25d366; font-weight: bold; padding: 1rem; font-size: 1.1rem; text-align: center; }
+.form-pedido { display: flex; flex-direction: column; gap: 1rem; margin: 1.5rem 0; }
+.form-pedido input, .form-pedido textarea { padding: 0.8rem; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
+.form-pedido textarea { min-height: 80px; resize: vertical; }
+.info { text-align: center; color: #7f8c8d; font-size: 0.9rem; margin-top: 1rem; }
+.resumo { background: #f8f9fa; padding: 1rem; border-radius: 12px; margin-bottom: 1.5rem; }
+.edit-form { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 0.5rem; align-items: center; background: #f1f1f1; padding: 0.8rem; border-radius: 8px; margin: 0.5rem 0; }
+.login-page { display: flex; justify-content: center; align-items: center; height: 100vh; background: #ecf0f1; }
+.login-box { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+.login-box input { width: 100%; padding: 0.8rem; margin: 0.5rem 0; border: 1px solid #ddd; border-radius: 8px; }static/manifest.json
+{
+  "name": "Bom Sabor Delivery",
+  "short_name": "Bom Sabor",
+  "description": "Delivery de pratos nordestinos",
+  "start_url": "/cliente",
+  "display": "standalone",
+  "background_color": "#d35400",
+  "theme_color": "#d35400",
+  "icons": [
+    {
+      "src": "https://via.placeholder.com/192",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/512",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}static/sw.js
+self.addEventListener('install', (e) => {
+  e.waitUntil(
+    caches.open('bom-sabor-cache').then((cache) => cache.addAll([
+      '/',
+      '/cliente',
+      '/static/style.css',
+      '/static/manifest.json'
+    ]))
+  );
+});
+
+self.addEventListener('fetch', (e) => {
+  e.respondWith(
+    caches.match(e.request).then((response) => response || fetch(e.request))
+  );
+});requirements.txt
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+gunicorn==22.0.0
